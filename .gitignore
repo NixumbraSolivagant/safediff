@@ -1,29 +1,50 @@
-# Build artifacts
-dist/
-build/
-*.egg-info/
-*.whl
-*.tar.gz
-
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Virtualenvs
+# Virtual environments
 .venv/
 venv/
+ENV/
+env/
+
+# Test / coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*.swo
 .DS_Store
 
-# Editor temp / safediff runtime
-*.tmp
-/tmp/
+# Build artifacts
+*.whl
+*.tar.gz

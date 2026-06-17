@@ -4,8 +4,6 @@
 
 `pip install safediff` and you'll be diffing model checkpoints in 30 seconds.
 
-![safediff demo](docs/demo.gif)
-
 ---
 
 ## Why?
