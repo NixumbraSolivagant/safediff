@@ -1,0 +1,29 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.whl
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Editor temp / safediff runtime
+*.tmp
+/tmp/

@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "safediff"
+version = "0.1.0"
+description = "Diff PyTorch model weights like you diff code. Find exploding layers, dead neurons, and visualize change in your terminal."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "safediff contributors" },
+]
+keywords = ["pytorch", "safetensors", "diff", "model-analysis", "dead-neurons", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "safetensors>=0.4",
+    "rich>=13.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0"]
+demo = ["huggingface_hub>=0.20"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+    "mypy>=1.7",
+    "build>=1.0",
+    "twine>=4.0",
+]
+
+[project.scripts]
+safediff = "safediff.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/NixumbraSolivagant/safediff"
+Issues = "https://github.com/NixumbraSolivagant/safediff/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/safediff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N"]
+ignore = ["E501", "B008", "UP045"]  # B008 is typer's documented pattern; UP045 needs 3.10+
+
+[tool.mypy]
+python_version = "3.9"
+strict_optional = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
