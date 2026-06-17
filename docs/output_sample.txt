@@ -1,62 +1,3 @@
-# safediff
-
-> **Stop guessing why your model collapsed. Diff your weights like you diff your code.**
-
-`pip install safediff` and you'll be diffing model checkpoints in 30 seconds.
-
----
-
-## Why?
-
-You're training a model. You save checkpoints at every epoch. Suddenly at epoch 47, the loss spikes to NaN. You open TensorBoard, stare at the loss curve, and... have no idea which layer exploded.
-
-`safediff` is a zero-dependency CLI that compares two checkpoints (`.safetensors` / `.pt` / `.pth` / `.bin`) and tells you:
-
-- which layers changed the most
-- which layers are statistical anomalies (probably the one that exploded)
-- which parameters are "dead" (stuck at zero — wasted compute)
-- a sparkline of the change distribution per layer, right in your terminal
-
-No web UI. No account. No telemetry. One Python script's worth of code.
-
-## Install
-
-```bash
-# For .safetensors only (recommended; ~5 MB install)
-pip install safediff
-
-# Add support for .pt / .pth / .bin PyTorch checkpoints
-pip install 'safediff[torch]'
-
-# Add the built-in demo (downloads a tiny GPT-2 on first use)
-pip install 'safediff[demo]'
-```
-
-## Quick start
-
-```bash
-# Diff two checkpoints and print a colored table
-safediff diff model_epoch_10.safetensors model_epoch_47.safetensors
-
-# Filter to attention layers only
-safediff diff A.safetensors B.safetensors --filter '*.attn.*'
-
-# Machine-readable output
-safediff diff A.safetensors B.safetensors --format json --output diff.json
-
-# Try it without any files (uses a built-in synthetic checkpoint pair)
-safediff demo
-```
-
-## Sample output
-
-Real output on GPT-2 small (137 M params):
-
-![safediff GPT-2 noise sensitivity demo](docs/assets/safediff-noise-sensitivity-demo.png)
-
-Top 8 layers from a full GPT-2 run (137 M params, base vs 1-epoch fine-tuned):
-
-```
 safediff A=137,022,720 params, B=137,022,720 params, common=20 layers
                                      Per-layer diff (sorted by L2 norm, descending)
 ┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
@@ -84,36 +25,19 @@ safediff A=137,022,720 params, B=137,022,720 params, common=20 layers
 │ h.3.mlp.c_fc.weight    │   220 │  2,359,296 │   0.01% │ ████████████████████ │
 │ h.4.mlp.c_fc.weight    │   182 │  2,359,296 │   0.01% │ █████████████████░░░ │
 │ h.2.mlp.c_proj.weight  │   178 │  2,359,296 │   0.01% │ ████████████████░░░░ │
-│ ...                    │       │            │         │                     │
+│ h.6.mlp.c_fc.weight    │   207 │  2,359,296 │   0.01% │ ███████████████████░ │
+│ h.9.mlp.c_fc.weight    │   177 │  2,359,296 │   0.01% │ ████████████████░░░░ │
+│ h.6.mlp.c_proj.weight  │   182 │  2,359,296 │   0.01% │ █████████████████░░░ │
+│ h.3.mlp.c_proj.weight  │   194 │  2,359,296 │   0.01% │ ██████████████████░░ │
+│ h.11.mlp.c_proj.weight │   211 │  2,359,296 │   0.01% │ ███████████████████░ │
+│ h.8.mlp.c_fc.weight    │   186 │  2,359,296 │   0.01% │ █████████████████░░░ │
+│ h.2.mlp.c_fc.weight    │   178 │  2,359,296 │   0.01% │ ████████████████░░░░ │
+│ h.11.mlp.c_fc.weight   │   194 │  2,359,296 │   0.01% │ ██████████████████░░ │
+│ h.8.mlp.c_proj.weight  │   186 │  2,359,296 │   0.01% │ █████████████████░░░ │
+│ h.7.mlp.c_fc.weight    │   186 │  2,359,296 │   0.01% │ █████████████████░░░ │
+│ h.4.mlp.c_proj.weight  │   168 │  2,359,296 │   0.01% │ ███████████████░░░░░ │
+│ h.7.mlp.c_proj.weight  │   176 │  2,359,296 │   0.01% │ ████████████████░░░░ │
+│ h.10.mlp.c_fc.weight   │   206 │  2,359,296 │   0.01% │ ███████████████████░ │
+│ h.10.mlp.c_proj.weight │   171 │  2,359,296 │   0.01% │ ████████████████░░░░ │
+│ h.9.mlp.c_proj.weight  │   189 │  2,359,296 │   0.01% │ █████████████████░░░ │
 └────────────────────────┴───────┴────────────┴─────────┴──────────────────────┘
-```
-
-The `wte.weight` embedding table dominates the L2 norm — expected, since it has 10x more parameters than any MLP layer.
-
-## How "anomaly" is decided
-
-A layer is flagged red when its L2 norm of `ΔW` is more than `--anomaly-threshold` times the global median, **or** its max-absolute `ΔW` exceeds 1.0 (a heuristic for fp32 numerical blowup). Both numbers are tunable:
-
-```bash
-safediff diff A B --anomaly-threshold 5 --eps 1e-8
-```
-
-## How "dead" is decided
-
-A parameter is "dead" if `|ΔW| < --eps`. Useful defaults:
-
-- `1e-6` for fp32 training (default)
-- `1e-3` for fp16 / bf16 mixed-precision training
-- `1e-8` for very high-precision experiments
-
-## Supported formats
-
-| Format | Requires | Notes |
-| --- | --- | --- |
-| `.safetensors` | nothing | fast, memory-mapped, recommended |
-| `.pt` / `.pth` | `pip install safediff[torch]` | full PyTorch state-dict support |
-| `.bin` | `pip install safediff[torch]` | LLaMA / Falcon legacy format |
-
-## License
-
-MIT
