@@ -1,118 +1,154 @@
 # safediff
 
-> **Stop guessing why your model collapsed. Diff your weights like you diff your code.**
+> **Find which layer caused the crash — before TensorBoard even noticed.**
 
-`pip install safediff` and you'll be diffing model checkpoints in 30 seconds.
+`pip install safediff` and start auditing checkpoints in 30 seconds.
 
 ---
 
-## Why?
+## What it does
 
-You're training a model. You save checkpoints at every epoch. Suddenly at epoch 47, the loss spikes to NaN. You open TensorBoard, stare at the loss curve, and... have no idea which layer exploded.
+`safediff` is a zero-dependency CLI for **static checkpoint analysis** — no GPU, no training loop, no web UI. Three commands:
 
-`safediff` is a zero-dependency CLI that compares two checkpoints (`.safetensors` / `.pt` / `.pth` / `.bin`) and tells you:
+| Command | What it does | When you need it |
+|---|---|---|
+| `safediff track <dir>` | Trace per-layer weight evolution across a directory of checkpoints | Your model collapsed at epoch 50 and you need to know which layer started drifting first |
+| `safediff audit <file>` | Scan a single checkpoint for NaN/Inf/outliers/frozen layers | Downloading a model from HuggingFace; running quantization; pre-flight check |
+| `safediff compare A B` | Per-layer diff between two checkpoints | Quick A/B comparison of two specific saves |
 
-- which layers changed the most
-- which layers are statistical anomalies (probably the one that exploded)
-- which parameters are "dead" (stuck at zero — wasted compute)
-- a sparkline of the change distribution per layer, right in your terminal
-
-No web UI. No account. No telemetry. One Python script's worth of code.
+The killer feature of `track` is **automatic divergence detection**: it flags the first layer that started drifting, even before your loss curve spiked. That's a question TensorBoard can't answer.
 
 ## Install
 
 ```bash
-# For .safetensors only (recommended; ~5 MB install)
+# Core — .safetensors only (recommended; ~5 MB)
 pip install safediff
 
-# Add support for .pt / .pth / .bin PyTorch checkpoints
+# Add .pt / .pth / .bin support
 pip install 'safediff[torch]'
 
-# Add the built-in demo (downloads a tiny GPT-2 on first use)
+# Built-in demo (downloads tiny GPT-2 on first run)
 pip install 'safediff[demo]'
 ```
 
 ## Quick start
 
 ```bash
-# Diff two checkpoints and print a colored table
-safediff diff model_epoch_10.safetensors model_epoch_47.safetensors
+# 1. Track weight evolution across a checkpoint directory
+safediff track ./checkpoints --top 10
 
-# Filter to attention layers only
-safediff diff A.safetensors B.safetensors --filter '*.attn.*'
+# 2. Audit a single model before loading it into GPU
+safediff audit model.safetensors
 
-# Machine-readable output
-safediff diff A.safetensors B.safetensors --format json --output diff.json
+# 3. Compare two checkpoints (the original diff command, still available)
+safediff compare epoch_10.safetensors epoch_47.safetensors
 
-# Try it without any files (uses a built-in synthetic checkpoint pair)
-safediff demo
+# 4. Filter to specific layers while tracking
+safediff track ./checkpoints --filter "*.mlp.c_proj.*" --metric incremental_l2
+
+# 5. Export report to file
+safediff audit model.safetensors --output audit.json --format json
 ```
 
-## Sample output
+## Track — Learning Dynamics Tracker
 
-Real output on GPT-2 small (137 M params):
+The most powerful command. Given a directory of checkpoints, it:
 
-![safediff GPT-2 noise sensitivity demo](docs/assets/safediff-noise-sensitivity-demo.png)
-
-Top 8 layers from a full GPT-2 run (137 M params, base vs 1-epoch fine-tuned):
+1. Sorts them chronologically (by `epoch_N` / `step_N` in filename, or mtime)
+2. Computes per-layer delta statistics from the baseline (checkpoint 0)
+3. Computes **incremental L2** (change since the previous checkpoint)
+4. Detects which layer first started diverging using **modified Z-score (MAD-based)**
 
 ```
-safediff A=137,022,720 params, B=137,022,720 params, common=20 layers
-                                     Per-layer diff (sorted by L2 norm, descending)
-┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
-┃ Layer                  ┃     Shape ┃   max|ΔW| ┃         L2 norm ┃       mean ┃       std ┃ dead % ┃ ΔW distribution ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ wte.weight             │ 50257x768 │ 5.761e-02 │       6.212e+01 │ +8.378e-07 │ 1.000e-02 │  0.01% │              ▂… │
-│                        │           │           │ ██████████████… │            │           │        │                 │
-│ h.5.mlp.c_proj.weight  │  3072x768 │ 5.234e-02 │       1.537e+01 │ -4.330e-06 │ 1.001e-02 │  0.01% │           ▂▂▃▄… │
-│                        │           │           │ █████░░░░░░░░░… │            │           │        │                 │
-│ h.3.mlp.c_fc.weight    │  768x3072 │ 5.061e-02 │       1.537e+01 │ +6.661e-06 │ 1.001e-02 │  0.01% │            ▂▂▃… │
-│                        │           │           │ █████░░░░░░░░░… │            │           │        │                 │
-│ h.4.mlp.c_fc.weight    │  768x3072 │ 5.035e-02 │       1.537e+01 │ +2.536e-07 │ 1.001e-02 │  0.01% │             ▂▃… │
-│                        │           │           │ █████░░░░░░░░░… │            │           │        │                 │
-│ h.2.mlp.c_proj.weight  │  3072x768 │ 5.012e-02 │       1.537e+01 │ +8.041e-06 │ 1.000e-02 │  0.01% │             ▂▂… │
-│                        │           │           │ █████░░░░░░░░░… │            │           │        │                 │
-└────────────────────────┴───────────┴───────────┴─────────────────┴────────────┴───────────┴────────┴─────────────────┘
+$ safediff track ./checkpoints --top 8
 
-⚠  20 anomalous layer(s) detected
-                     Top 20 layers by dead-parameter ratio
-┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Layer                  ┃  dead ┃      total ┃   ratio ┃ distribution         ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━┩
-│ wte.weight             │ 3,087 │ 38,597,376 │   0.01% │ █████████████████░░░ │
-│ h.5.mlp.c_proj.weight  │   200 │  2,359,296 │   0.01% │ ██████████████████░░ │
-│ h.3.mlp.c_fc.weight    │   220 │  2,359,296 │   0.01% │ ████████████████████ │
-│ h.4.mlp.c_fc.weight    │   182 │  2,359,296 │   0.01% │ █████████████████░░░ │
-│ h.2.mlp.c_proj.weight  │   178 │  2,359,296 │   0.01% │ ████████████████░░░░ │
-│ ...                    │       │            │         │                     │
-└────────────────────────┴───────┴────────────┴─────────┴──────────────────────┘
+safediff track  20 layers × 50 checkpoints  (epoch_01 → epoch_50)
+
+⚠  3 layer(s) diverged during training
+  ▸  transformer.h.11.mlp.c_proj.weight  first drifted at epoch_23
+     (incr L2 = 2.47, z = 6.3)
+  ▸  transformer.h.10.mlp.c_fc.weight   first drifted at epoch_31
+     (incr L2 = 1.83, z = 4.1)
+  ▸  transformer.h.9.attn.c_proj.weight  first drifted at epoch_38
+     (incr L2 = 0.91, z = 3.7)
+
+Top 8 layers by cumulative_l2  (epoch_01, epoch_10, epoch_20, epoch_30, epoch_40, epoch_50)
+┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Layer                  ┃  epoch_01   ┃  epoch_10  ┃  epoch_20  ┃  epoch_30  ┃  epoch_40  ┃  epoch_50  ┃ trend ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━┩
+│ transformer.wte.weight │   6.21e+01  │  8.47e+01  │  1.12e+02  │  1.48e+02  │  1.89e+02  │  2.31e+02  │ ▂▄▅▆▇▇ │
+│ transformer.h.11…     │   1.53e+01  │  2.87e+01  │  5.14e+01  │  8.29e+01  │  1.21e+02  │  1.68e+02  │ ▂▂▃▄▇█ │
+│ transformer.h.10…     │   1.53e+01  │  2.01e+01  │  3.14e+01  │  5.82e+01  │  7.91e+01  │  1.01e+02  │ ▂▃▃▄▆▇ │
+│ ...
 ```
 
-The `wte.weight` embedding table dominates the L2 norm — expected, since it has 10x more parameters than any MLP layer.
+The key insight: `h.11.mlp.c_proj.weight` started drifting at **epoch 23**, but the loss spike didn't appear until epoch 50. Without safediff, you'd never know which layer planted the seed.
 
-## How "anomaly" is decided
+### How divergence detection works
 
-A layer is flagged red when its L2 norm of `ΔW` is more than `--anomaly-threshold` times the global median, **or** its max-absolute `ΔW` exceeds 1.0 (a heuristic for fp32 numerical blowup). Both numbers are tunable:
+Uses the **Modified Z-score** based on Median Absolute Deviation (MAD), the NIST-recommended robust alternative to standard deviation:
+
+```
+z = |value - median| / (1.4826 × MAD)
+```
+
+A layer is flagged when `z > 3.5` (the NIST threshold). This is robust to the very outliers it detects — unlike using standard deviation.
+
+## Audit — Model Sanity Checker
+
+Run before loading a model into GPU, or before quantisation:
 
 ```bash
-safediff diff A B --anomaly-threshold 5 --eps 1e-8
+$ safediff audit model.safetensors
+
+safediff audit  20 layers, 137,022,720 params  ✗ issues found
+File: model.safetensors
+
+⚠  1 layer(s) with extreme outliers (>5σ from mean)
+  layer                  shape          outliers / total   fraction  range
+  transformer.h.11…      3072×768       847 / 2,359,296    0.036%   [-0.72, 0.74]
+
+✓  No NaN / Inf detected
+✓  No near-zero layers
+✓  No frozen layer pairs
 ```
 
-## How "dead" is decided
+Checks performed:
+- **NaN / Inf** — will crash GPU kernels immediately
+- **Extreme outliers** — blocks INT8 / GPTQ / AWQ quantisation
+- **Near-zero layers** — >90% of weights ≈ 0 (wasted memory)
+- **Frozen layer pairs** — two layers with identical weights (copy-paste bug)
 
-A parameter is "dead" if `|ΔW| < --eps`. Useful defaults:
+## Compare — Two-way diff
 
-- `1e-6` for fp32 training (default)
-- `1e-3` for fp16 / bf16 mixed-precision training
-- `1e-8` for very high-precision experiments
+The original command, available as `compare` (or `diff` for backwards compatibility):
+
+```bash
+safediff compare A.safetensors B.safetensors --filter "*.attn.*"
+```
 
 ## Supported formats
 
 | Format | Requires | Notes |
-| --- | --- | --- |
+|---|---|---|
 | `.safetensors` | nothing | fast, memory-mapped, recommended |
 | `.pt` / `.pth` | `pip install safediff[torch]` | full PyTorch state-dict support |
 | `.bin` | `pip install safediff[torch]` | LLaMA / Falcon legacy format |
+
+## Architecture
+
+```
+safediff/
+├── cli.py          # Typer CLI — 4 subcommands
+├── loader.py       # Format-agnostic tensor loading (safetensors / torch)
+├── analyzer.py      # Two-checkpoint diff engine (pure numpy)
+├── track.py        # Learning Dynamics Tracker (pure numpy)
+├── audit.py        # Model Sanity Checker (pure numpy)
+├── visualizer.py   # Rich terminal rendering
+└── demo.py        # Built-in demo with offline fallback
+```
+
+All core analysis is **pure numpy** — no PyTorch dependency at runtime. The torch extra is only needed to load `.pt`/`.pth`/`.bin` files.
 
 ## License
 
