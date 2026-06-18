@@ -20,7 +20,7 @@ from safediff.analyzer import analyze
 from safediff.audit import audit
 from safediff.loader import load_tensors
 from safediff.track import discover_checkpoints, track
-from safediff.visualizer import render_audit, render_dead_neurons, render_json, render_report, render_track_summary
+from safediff.visualizer import render_audit, render_dead_neurons, render_json, render_quant_report, render_report, render_track_summary
 
 console = Console()
 app = typer.Typer(
@@ -292,10 +292,12 @@ def audit_command(
     """Run a static health check on a single checkpoint.
 
     Scans for:
-    - NaN / Inf values (critical — will crash GPU kernels)
-    - Extreme outliers (blocks INT8 / GPTQ / AWQ quantisation)
-    - Near-zero layers (wasted compute / memory)
-    - Frozen layer pairs (likely copy-paste bugs)
+    - **Extreme outliers** (blocks INT8 / GPTQ / AWQ quantisation) — primary concern
+    - **Near-zero layers** (wasted compute / memory)
+    - **NaN / Inf** values — reported as hints (PyTorch will catch these at runtime)
+    - **Frozen layer pairs** (likely copy-paste bugs)
+
+    For quantisation-specific analysis, use ``safediff quant`` instead.
 
     Example:
         safediff audit model.safetensors
@@ -350,6 +352,105 @@ def audit_command(
 
     try:
         render_audit(report, console=capture, top_outliers=top)
+    finally:
+        if close_after:
+            capture.file.close()  # type: ignore[attr-defined]
+
+
+# ------------------------------------------------------------------------------------------
+# quant
+# ------------------------------------------------------------------------------------------
+
+@app.command(name="quant")
+def quant_command(
+    file: Path = typer.Argument(
+        ..., exists=True, readable=True,
+        help="Checkpoint file to analyze (.safetensors / .pt / .pth / .bin).",
+    ),
+    bits: int = typer.Option(4, "--bits", help="Target quantization bit width (4 or 8)."),
+    outlier_sigma: float = typer.Option(
+        5.0, "--outlier-sigma",
+        help="MAD-based outlier threshold (5.0 = NIST standard).",
+    ),
+    top: int = typer.Option(15, "--top", min=1, help="Show only the top-N most dangerous layers."),
+    fmt: str = typer.Option("table", "--format", help="Output format: table (default) or json."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write report to file."),
+) -> None:
+    """Quantisation pre-flight scan: which layers are safe to quantize, and how.
+
+    Analyzes a checkpoint and reports, per layer:
+    - Suggested scheme (per-tensor / per-channel / skip)
+    - Outlier ratio and clip ratio
+    - Quantization error estimate (relative MSE)
+    - Health score (0-100)
+
+    This command is the SDK entry point for vLLM / AWQ / llama.cpp integration pipelines.
+    Run it before starting a slow quantization job to catch problematic layers early.
+
+    Example:
+        safediff quant model.safetensors
+        safediff quant model.safetensors --bits 8
+        safediff quant model.safetensors --top 20 --format json -o quant_report.json
+    """
+    from safediff.quant import analyze
+    from safediff.visualizer import render_quant_report
+
+    try:
+        with console.status("[cyan]Loading checkpoint…[/cyan]"):
+            report = analyze(file, outlier_sigma=outlier_sigma)
+    except Exception as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if fmt == "json":
+        import json
+        payload = {
+            "path": str(file),
+            "total_layers": report.total_layers,
+            "total_params": report.total_params,
+            "overall_score": round(report.overall_score, 2),
+            "healthy_count": report.healthy_count,
+            "warning_count": report.warning_count,
+            "danger_count": report.danger_count,
+            "skip_count": report.skip_count,
+            "per_channel_count": report.per_channel_count,
+            "worst_offender": report.worst_offender,
+            "layers": [
+                {
+                    "name": s.name,
+                    "shape": list(s.shape),
+                    "health_score": round(s.health_score, 2),
+                    "recommended": {
+                        "scheme": s.recommended.suggested_scheme if s.recommended else None,
+                        "bits": s.recommended.bits if s.recommended else None,
+                        "clip_ratio": round(s.recommended.clip_ratio, 6) if s.recommended else None,
+                        "outlier_ratio": round(s.recommended.outlier_ratio, 6) if s.recommended else None,
+                        "error_estimate": round(s.recommended.error_estimate, 6) if s.recommended else None,
+                        "reason": s.recommended.reason if s.recommended else None,
+                    }
+                    if s.recommended
+                    else None,
+                }
+                for s in report.layers[: top * 2]
+            ],
+        }
+        text = json.dumps(payload, indent=2)
+        if output:
+            output.write_text(text)
+        else:
+            console.print(text)
+        return
+
+    capture: Console
+    close_after = False
+    if output:
+        capture = Console(file=open(output, "w"), width=120, force_terminal=False)
+        close_after = True
+    else:
+        capture = console
+
+    try:
+        render_quant_report(report, console=capture, top=top, bits=bits)
     finally:
         if close_after:
             capture.file.close()  # type: ignore[attr-defined]

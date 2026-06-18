@@ -385,3 +385,112 @@ def normalize(values: list[float]) -> list[float]:
     if mx - mn < 1e-12:
         return [0.0] * len(values)
     return [(v - mn) / (mx - mn) for v in values]
+
+
+# ------------------------------------------------------------------------------------------
+# Public API for external integrations (e.g. the TrainerTracker class)
+# ------------------------------------------------------------------------------------------
+
+def compute_delta(
+    current: dict[str, np.ndarray],
+    baseline: dict[str, np.ndarray],
+    prev_delta: dict[str, np.ndarray] | None,
+    dead_eps: float = 1e-6,
+) -> tuple[dict[str, LayerSnapshot], dict[str, np.ndarray]]:
+    """Compute per-layer incremental deltas from a baseline.
+
+    This is the core delta engine extracted from ``track()`` for use by
+    integrations that manage their own state and don't need CLI I/O.
+
+    Args:
+        current: Current layer weights as ``{name: np.ndarray}``.
+        baseline: Baseline (reference) layer weights.  Values must have the same
+            shape as those in ``current``.
+        prev_delta: Previous delta map from the last call, or ``None`` for the
+            first call.  Use the returned new delta map on the next call.
+        dead_eps: Threshold for "dead parameter" classification.
+
+    Returns:
+        (snapshots, new_delta_map) where:
+        - snapshots: {name: LayerSnapshot} for this step
+        - new_delta_map: {name: np.ndarray} — pass as ``prev_delta`` on next call
+    """
+    if prev_delta is None:
+        prev_delta = {name: None for name in baseline}
+
+    snapshots: dict[str, LayerSnapshot] = {}
+    new_delta_map: dict[str, np.ndarray] = {}
+
+    for name in baseline:
+        if name not in current:
+            continue
+
+        arr = current[name]
+        base_arr = baseline[name]
+
+        if arr.shape != base_arr.shape:
+            snapshot = LayerSnapshot(
+                checkpoint_step=-1,
+                l2_norm=float("inf"),
+                max_abs=float("inf"),
+                mean=float("nan"),
+                std=float("nan"),
+                dead_fraction=0.0,
+                incremental_l2=float("inf"),
+                incremental_max_abs=float("inf"),
+            )
+            snapshots[name] = snapshot
+            new_delta_map[name] = base_arr  # cannot compute delta
+            continue
+
+        delta = arr - base_arr
+        prev = prev_delta.get(name)
+        incr_delta = (delta - prev) if prev is not None else delta
+
+        abs_delta = np.abs(delta)
+        abs_incr = np.abs(incr_delta)
+        numel = delta.size
+
+        l2_norm = float(np.linalg.norm(delta)) if numel > 0 else 0.0
+        max_abs = float(abs_delta.max()) if numel > 0 else 0.0
+        mean_val = float(delta.mean()) if numel > 0 else 0.0
+        std_val = float(delta.std()) if numel > 0 else 0.0
+        dead_fraction = float(np.mean(abs_delta < dead_eps)) if numel > 0 else 0.0
+        incr_l2 = float(np.linalg.norm(incr_delta)) if numel > 0 else 0.0
+        incr_max = float(abs_incr.max()) if numel > 0 else 0.0
+
+        snapshots[name] = LayerSnapshot(
+            checkpoint_step=-1,
+            l2_norm=l2_norm,
+            max_abs=max_abs,
+            mean=mean_val,
+            std=std_val,
+            dead_fraction=dead_fraction,
+            incremental_l2=incr_l2,
+            incremental_max_abs=incr_max,
+        )
+        new_delta_map[name] = delta
+
+    return snapshots, new_delta_map
+
+
+def anomaly_score(
+    history: list[float],
+    value: float,
+    threshold: float = 3.5,
+) -> float:
+    """Return the modified Z-score for ``value`` against ``history``.
+
+    Wrapper around ``modified_zscore`` for discoverability in the public API.
+    Returns the Z-score; the caller decides whether to act on it.
+
+    Args:
+        history: Prior values (must have at least 2 elements).
+        value: New observation to score.
+        threshold: Threshold above which the value is considered anomalous.
+                   Defaults to 3.5 (NIST recommended).
+
+    Returns:
+        Modified Z-score.  Values > ``threshold`` indicate divergence.
+    """
+    return modified_zscore(value, history)

@@ -469,3 +469,146 @@ def render_audit(
         console.print(
             "\n[bold green]OK:  No numerical issues detected. Model looks healthy.[/bold green]"
         )
+
+
+# ------------------------------------------------------------------------------------------
+# Quantisation pre-flight report rendering
+# ------------------------------------------------------------------------------------------
+
+from safediff.quant import QuantLayerStat, QuantReport
+
+
+def _quant_health_color(score: float) -> str:
+    if score >= 80:
+        return "green"
+    if score >= 50:
+        return "yellow"
+    return "red"
+
+
+def _scheme_color(scheme: str) -> str:
+    if scheme == "per-tensor":
+        return "green"
+    if scheme == "per-channel":
+        return "yellow"
+    return "red"
+
+
+def render_quant_report(
+    report: QuantReport,
+    *,
+    console: Console | None = None,
+    top: int = 15,
+    bits: int = 4,
+) -> None:
+    """Render a QuantReport to the terminal.
+
+    Args:
+        report: The output of ``quant.analyze()``.
+        console: Rich console to write to.  Defaults to stdout.
+        top: Show only the top-N most dangerous layers.
+        bits: Which bit width to display recommendations for.
+    """
+    console = console or Console()
+
+    # --- Header ---
+    score_color = _quant_health_color(report.overall_score)
+    console.print(
+        f"[bold]safediff quant[/bold]  {report.total_layers} layers, "
+        f"{report.total_params:,} params  "
+        f"[bold {score_color}]score={report.overall_score:.1f}[/bold {score_color}]"
+    )
+    console.print(f"[dim]File: {report.path}[/dim]")
+
+    # --- Summary row ---
+    summary_parts = []
+    if report.danger_count:
+        summary_parts.append(f"[bold red]⛔ {report.danger_count} danger[/bold red]")
+    if report.warning_count:
+        summary_parts.append(f"[bold yellow]⚠  {report.warning_count} caution[/bold yellow]")
+    if report.healthy_count:
+        summary_parts.append(f"[bold green]✅ {report.healthy_count} healthy[/bold green]")
+    if report.skip_count:
+        summary_parts.append(f"[dim]⊘ {report.skip_count} skip[/dim]")
+    if report.per_channel_count:
+        summary_parts.append(f"[yellow]⟲ {report.per_channel_count} per-channel[/yellow]")
+    console.print("  ".join(summary_parts) if summary_parts else "[green]all layers clean[/green]")
+
+    if report.worst_offender:
+        console.print(f"[dim]Worst offender: {report.worst_offender}[/dim]")
+
+    if not report.layers:
+        console.print("[yellow]No layers to display.[/yellow]")
+        return
+
+    # --- Per-layer table ---
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        title=f"Top {min(top, len(report.layers))} layers by quantisation health (sorted worst → best)",
+        title_style="bold cyan",
+    )
+    table.add_column("Layer", style="cyan", no_wrap=True)
+    table.add_column("Shape", justify="right")
+    table.add_column("Bits", justify="right")
+    table.add_column("Scheme", justify="center")
+    table.add_column("Clip%", justify="right")
+    table.add_column("Outlier%", justify="right")
+    table.add_column("Rel.MSE", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Distribution", ratio=1)
+
+    def _fmt_frac(f: float) -> str:
+        return f"{f * 100:.3f}%"
+
+    display_layers = report.layers[:top]
+    peak_score = max(s.health_score for s in report.layers) if report.layers else 100.0
+
+    for stat in display_layers:
+        scheme = stat.recommended
+        if scheme is None:
+            continue
+
+        health_color = _quant_health_color(stat.health_score)
+        scheme_color = _scheme_color(scheme.suggested_scheme)
+        row_style = f"bold {health_color}" if stat.health_score < 50 else None
+        score_bar = _bar(stat.health_score, peak_score, width=10)
+
+        table.add_row(
+            _truncate(stat.name, 40),
+            "x".join(str(d) for d in stat.shape),
+            str(scheme.bits),
+            f"[{scheme_color}]{scheme.suggested_scheme}[/{scheme_color}]",
+            _fmt_frac(scheme.clip_ratio),
+            _fmt_frac(scheme.outlier_ratio),
+            f"{scheme.error_estimate:.4f}",
+            f"[{health_color}]{stat.health_score:.0f} {score_bar}[/{health_color}]",
+            "",
+            style=row_style,
+        )
+
+    console.print(table)
+
+    # --- Hints section ---
+    skip_layers = [s for s in report.layers if s.recommended and s.recommended.suggested_scheme == "skip"]
+    if skip_layers:
+        console.print(
+            f"\n[bold yellow]⊘ {len(skip_layers)} layer(s) recommended to skip at {bits}bit[/bold yellow]"
+        )
+        for s in skip_layers[:5]:
+            console.print(f"  [dim]≈[/dim]  [cyan]{s.name}[/cyan]")
+        if len(skip_layers) > 5:
+            console.print(f"  [dim]… and {len(skip_layers) - 5} more[/dim]")
+
+    per_channel_layers = [
+        s for s in report.layers
+        if s.recommended and s.recommended.suggested_scheme == "per-channel"
+    ]
+    if per_channel_layers:
+        console.print(
+            f"\n[bold yellow]⟲ {len(per_channel_layers)} layer(s) may need per-channel quantization[/bold yellow]"
+        )
+        for s in per_channel_layers[:5]:
+            console.print(f"  [dim]⟲[/dim]  [cyan]{s.name}[/cyan]")
+        if len(per_channel_layers) > 5:
+            console.print(f"  [dim]… and {len(per_channel_layers) - 5} more[/dim]")

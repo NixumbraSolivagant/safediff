@@ -242,3 +242,88 @@ class TestDivergenceAlert:
         assert alert.layer_name == "test.layer"
         assert alert.first_drift_step == 3
         assert len(alert.l2_trend) == 5
+
+
+# ------------------------------------------------------------------------------------------
+# Public API: compute_delta, anomaly_score
+# ------------------------------------------------------------------------------------------
+
+from safediff.track import compute_delta, anomaly_score
+
+
+class TestComputeDelta:
+    def test_returns_snapshots_and_new_delta_map(self) -> None:
+        baseline = {"w": np.zeros((5, 5), dtype=np.float32)}
+        current = {"w": np.ones((5, 5), dtype=np.float32)}
+        snapshots, new_delta = compute_delta(current, baseline, prev_delta=None)
+        assert "w" in snapshots
+        assert snapshots["w"].l2_norm > 0
+        assert "w" in new_delta
+        assert new_delta["w"].shape == (5, 5)
+
+    def test_incremental_delta_uses_prev_delta(self) -> None:
+        baseline = {"w": np.zeros((5, 5), dtype=np.float32)}
+        current1 = {"w": np.ones((5, 5), dtype=np.float32)}
+        current2 = {"w": np.full((5, 5), 2.0, dtype=np.float32)}
+
+        _, delta1 = compute_delta(current1, baseline, prev_delta=None)
+        snapshots2, delta2 = compute_delta(current2, baseline, prev_delta=delta1)
+
+        # First delta: w = ones - zeros = ones
+        assert delta1["w"].max() == pytest.approx(1.0)
+        # Second delta: w - prev_delta = twos - ones = ones (incremental)
+        assert snapshots2["w"].incremental_l2 > 0
+        assert snapshots2["w"].incremental_l2 < snapshots2["w"].l2_norm
+
+    def test_missing_layer_skipped(self) -> None:
+        baseline = {"a": np.zeros((5, 5)), "b": np.zeros((5, 5))}
+        current = {"a": np.ones((5, 5))}  # "b" is missing
+        snapshots, _ = compute_delta(current, baseline, prev_delta=None)
+        assert "a" in snapshots
+        assert "b" not in snapshots
+
+    def test_shape_mismatch_produces_inf(self) -> None:
+        baseline = {"w": np.zeros((5, 5))}
+        current = {"w": np.zeros((3, 3))}
+        snapshots, _ = compute_delta(current, baseline, prev_delta=None)
+        assert snapshots["w"].l2_norm == float("inf")
+
+    def test_dead_fraction_calculated(self) -> None:
+        baseline = {"w": np.zeros((10, 10))}
+        current = {"w": np.zeros((10, 10))}  # identical → all dead
+        snapshots, _ = compute_delta(current, baseline, prev_delta=None)
+        assert snapshots["w"].dead_fraction == pytest.approx(1.0)
+
+    def test_prev_delta_none_uses_full_delta(self) -> None:
+        baseline = {"w": np.zeros((5, 5))}
+        current = {"w": np.full((5, 5), 3.0)}
+        snapshots, _ = compute_delta(current, baseline, prev_delta=None)
+        # No prev_delta → incremental = full
+        assert snapshots["w"].incremental_l2 == snapshots["w"].l2_norm
+
+
+class TestAnomalyScore:
+    def test_identical_history_returns_zero(self) -> None:
+        history = [1.0, 1.0, 1.0, 1.0]
+        score = anomaly_score(history, 1.0)
+        assert score == 0.0
+
+    def test_outlier_returns_high_score(self) -> None:
+        history = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 100.0]
+        score = anomaly_score(history, 100.0)
+        assert score > 3.5  # should exceed NIST threshold
+
+    def test_normal_value_returns_low_score(self) -> None:
+        history = [1.0, 2.0, 3.0, 4.0, 5.0]
+        score = anomaly_score(history, 3.0)
+        assert score < 1.0
+
+    def test_threshold_parameter_works(self) -> None:
+        history = [1.0, 1.0, 1.0, 1.0, 10.0]
+        score = anomaly_score(history, 10.0, threshold=5.0)
+        # score should be high (>5) but we just verify the param is accepted
+        assert score > 0
+
+    def test_empty_history_returns_zero(self) -> None:
+        score = anomaly_score([], 1.0)
+        assert score == 0.0

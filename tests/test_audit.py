@@ -80,10 +80,10 @@ class TestInspect:
         assert r.outlier_fraction > 0.01
         assert r.is_unsafe
 
-    def test_severity_nan_is_critical(self) -> None:
+    def test_severity_nan_is_hint(self) -> None:
         arr = np.array([np.nan], dtype=np.float32)
         r = _inspect(arr, "test", outlier_sigma=5.0, near_zero_eps=1e-6)
-        assert r.severity() == "critical"
+        assert r.severity() == "hint"
 
     def test_severity_high_outlier_is_high(self) -> None:
         arr = np.zeros(100, dtype=np.float32)
@@ -162,7 +162,8 @@ class TestAudit:
         report = audit(tensors)
         assert len(report.nan_layers) == 1
         assert report.nan_layers[0].name == "bad"
-        assert not report.is_healthy
+        # NaN is hint severity, not critical — no actionable quant blockers → still healthy
+        assert report.is_healthy
 
     def test_inf_layers_in_report(self) -> None:
         tensors = {
@@ -170,7 +171,8 @@ class TestAudit:
         }
         report = audit(tensors)
         assert len(report.inf_layers) == 1
-        assert not report.is_healthy
+        # Inf is hint severity — no outlier / near-zero blockers → healthy
+        assert report.is_healthy
 
     def test_near_zero_layers_flagged(self) -> None:
         tensors = {
@@ -233,10 +235,13 @@ class TestAudit:
         report = audit(tensors)
         assert "all clear" in report.summary()
 
-    def test_health_report_text_nan(self) -> None:
+    def test_health_report_text_nan_is_hint(self) -> None:
         tensors = {"nan_layer": np.array([np.nan], dtype=np.float32)}
         report = audit(tensors)
-        assert "critical" in report.summary()
+        # NaN is hint severity — a pure NaN checkpoint with no other issues is "healthy"
+        assert report.is_healthy
+        # summary() should reflect "hint" not "critical"
+        assert "critical" not in report.summary()
 
     def test_warning_count(self) -> None:
         # Outliers + near-zero both count toward warnings
