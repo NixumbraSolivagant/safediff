@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 from rich.console import Console
@@ -210,3 +211,261 @@ def render_json(
         "layers": [s.to_dict() for s in report.common],
     }
     return json.dumps(payload, indent=2)
+
+
+# ------------------------------------------------------------------------------------------
+# Learning Dynamics Tracker rendering
+# ------------------------------------------------------------------------------------------
+
+from safediff.track import (
+    CheckpointInfo,
+    DivergenceAlert,
+    LayerSeries,
+    top_layers_by_drift,
+    normalize,
+)
+
+
+def _draw_trend_line(values: list[float], width: int = 30) -> str:
+    """Draw a Unicode bar-chart column from a list of values (first → last)."""
+    if len(values) < 2:
+        return " " * width
+    normed = normalize(values)
+    col_h = 6  # characters of vertical resolution
+    if width <= 0:
+        return ""
+    # Build column-major output: for each row (top to bottom), output one
+    # block char per column (left to right) if the column's "height" is at or
+    # above that row.
+    lines = [""] * col_h
+    for x_idx, norm_val in enumerate(normed):
+        if norm_val <= 0:
+            continue
+        # Invert so first value is left, last is right; taller = lower row
+        row_idx = int((1.0 - norm_val) * (col_h - 1))
+        row_idx = max(0, min(col_h - 1, row_idx))
+        # Mark this column up to its row_idx
+        # We'll iterate over columns and pad; here we just record (x_idx, row_idx)
+        # Build output as: each row string padded to x_idx+1 width, with a block
+        for r in range(col_h):
+            if r >= row_idx:
+                lines[r] = lines[r].ljust(x_idx) + "▄"
+            else:
+                lines[r] = lines[r].ljust(x_idx + 1)
+    return "\n".join(lines)
+
+
+def render_track_summary(
+    checkpoints: list[CheckpointInfo],
+    layer_series: dict[str, LayerSeries],
+    alerts: list[DivergenceAlert],
+    *,
+    console: Console | None = None,
+    top: int = 15,
+    metric: str = "cumulative_l2",
+) -> None:
+    """Render the Learning Dynamics summary table to the terminal."""
+    console = console or Console()
+
+    n_ckpts = len(checkpoints)
+    labels = [c.label for c in checkpoints]
+
+    console.print(
+        f"[bold]safediff track[/bold]  {len(layer_series)} layers × {n_ckpts} checkpoints  "
+        f"({checkpoints[0].label} → {checkpoints[-1].label})"
+    )
+
+    # --- Divergence alerts ---
+    if alerts:
+        console.print(f"\n[bold red]⚠  {len(alerts)} layer(s) diverged during training[/bold red]")
+        for alert in alerts[:5]:
+            step_label = (
+                checkpoints[alert.first_drift_step].label
+                if alert.first_drift_step < len(checkpoints)
+                else str(alert.first_drift_step)
+            )
+            console.print(
+                f"  [red]▸[/red]  [cyan]{alert.layer_name}[/cyan] "
+                f"first drifted at [yellow]{step_label}[/yellow] "
+                f"(incr L2 = {alert.first_drift_incr_l2:.3e}, z = {alert.modified_zscore:.1f})"
+            )
+        if len(alerts) > 5:
+            console.print(f"  [dim]… and {len(alerts) - 5} more[/dim]")
+    else:
+        console.print("[green]No divergent layers detected.[/green]")
+
+    # --- Per-layer trend table ---
+    top_layers = top_layers_by_drift(layer_series, metric=metric, top=top)
+
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        title=f"Top {top} layers by {metric}  ({', '.join(labels)})",
+        title_style="bold cyan",
+    )
+    table.add_column("Layer", style="cyan", no_wrap=True)
+    table.add_column("Shape", justify="right")
+    for label in labels:
+        table.add_column(label, justify="right", min_width=7)
+    table.add_column("trend", ratio=1)
+
+    for name, final_value, l2_vals in top_layers:
+        series = layer_series[name]
+        row_style = "bold red" if any(a.layer_name == name for a in alerts) else None
+        snapshot_vals = [s.l2_norm for s in series.snapshots]
+        trend = _draw_trend_line(snapshot_vals, width=20)
+        row = [_truncate(name, 40), "x".join(str(d) for d in series.shape)]
+        for val in snapshot_vals:
+            row.append(f"{val:.2e}" if np.isfinite(val) else "∞")
+        row.append(trend)
+        table.add_row(*row, style=row_style)
+
+    console.print(table)
+
+    if checkpoints[0].path.parent.name:
+        console.print(f"[dim]Checkpoint dir: {checkpoints[0].path.parent}[/dim]")
+
+
+def render_audit(
+    report,  # AuditReport
+    *,
+    console: Console | None = None,
+    top_outliers: int = 10,
+) -> None:
+    """Render an AuditReport to the terminal."""
+    from safediff.audit import AuditReport
+
+    console = console or Console()
+    assert isinstance(report, AuditReport)
+
+    path_str = str(report.path) if report.path != Path("<unknown>") else "<stdin>"
+
+    # Header
+    if report.is_healthy:
+        status_text = "[bold green]OK healthy[/bold green]"
+    else:
+        status_text = "[bold red]ISSUES FOUND[/bold red]"
+    console.print(
+        f"[bold]safediff audit[/bold]  {report.total_layers} layers, "
+        f"{report.total_params:,} params  {status_text}"
+    )
+    console.print(f"[dim]File: {path_str}[/dim]")
+
+    # Critical: NaN
+    if report.nan_layers:
+        console.print(f"\n[bold red]CRITICAL:  {len(report.nan_layers)} layer(s) contain NaN[/bold red]")
+        tbl = Table(
+            show_header=True, header_style="bold", title="NaN layers", title_style="bold red"
+        )
+        tbl.add_column("Layer", style="red")
+        tbl.add_column("Shape", justify="right")
+        tbl.add_column("min", justify="right")
+        tbl.add_column("max", justify="right")
+        tbl.add_column("mean", justify="right")
+        for r in report.nan_layers[:top_outliers]:
+            tbl.add_row(
+                _truncate(r.name, 50),
+                "x".join(str(d) for d in r.shape),
+                f"{r.min_val:.3e}",
+                f"{r.max_val:.3e}",
+                f"{r.mean_val:.3e}",
+            )
+        console.print(tbl)
+
+    # Critical: Inf
+    if report.inf_layers:
+        console.print(f"\n[bold red]CRITICAL:  {len(report.inf_layers)} layer(s) contain Inf[/bold red]")
+        tbl = Table(
+            show_header=True, header_style="bold", title="Inf layers", title_style="bold red"
+        )
+        tbl.add_column("Layer", style="red")
+        tbl.add_column("Shape", justify="right")
+        tbl.add_column("min", justify="right")
+        tbl.add_column("max", justify="right")
+        for r in report.inf_layers[:top_outliers]:
+            inf_type = []
+            if r.has_pos_inf:
+                inf_type.append("+Inf")
+            if r.has_neg_inf:
+                inf_type.append("-Inf")
+            tbl.add_row(
+                _truncate(r.name, 50),
+                "x".join(str(d) for d in r.shape),
+                f"{r.min_val:.3e}" + (" (+Inf)" if r.has_pos_inf else ""),
+                f"{r.max_val:.3e}" + (" (-Inf)" if r.has_neg_inf else ""),
+            )
+        console.print(tbl)
+
+    # Outliers
+    if report.outlier_layers:
+        console.print(
+            f"\n[bold yellow]WARNING:  {len(report.outlier_layers)} layer(s) with extreme outliers "
+            f"(>{r.outlier_sigma}σ from mean)[/bold yellow]"
+        )
+        tbl = Table(
+            show_header=True,
+            header_style="bold",
+            title=f"Outlier layers (> {report.outlier_layers[0].outlier_sigma}σ)",
+            title_style="bold yellow",
+        )
+        tbl.add_column("Layer", style="yellow")
+        tbl.add_column("Shape", justify="right")
+        tbl.add_column("outliers / total", justify="right")
+        tbl.add_column("fraction", justify="right")
+        tbl.add_column("range", justify="right")
+        tbl.add_column("dist", ratio=1)
+        peak = report.outlier_layers[0].outlier_fraction
+        for r in report.outlier_layers[:top_outliers]:
+            bar = _bar(r.outlier_fraction, peak, width=15)
+            tbl.add_row(
+                _truncate(r.name, 45),
+                "x".join(str(d) for d in r.shape),
+                f"{r.outlier_count:,} / {r.numel:,}",
+                f"{r.outlier_fraction * 100:.3f}%",
+                f"[{r.mean_val - r.outlier_sigma * r.std_val:.1e}, {r.mean_val + r.outlier_sigma * r.std_val:.1e}]",
+                bar,
+            )
+        console.print(tbl)
+
+    # Near-zero
+    if report.near_zero_layers:
+        console.print(
+            f"\n[bold yellow]WARNING:  {len(report.near_zero_layers)} layer(s) are near-zero "
+            f"(>90% of weights ≈ 0)[/bold yellow]"
+        )
+        tbl = Table(
+            show_header=True,
+            header_style="bold",
+            title="Near-zero layers",
+            title_style="bold yellow",
+        )
+        tbl.add_column("Layer", style="yellow")
+        tbl.add_column("Shape", justify="right")
+        tbl.add_column("near-zero / total", justify="right")
+        tbl.add_column("fraction", justify="right")
+        tbl.add_column("distribution", ratio=1)
+        peak = report.near_zero_layers[0].near_zero_fraction
+        for r in report.near_zero_layers[:top_outliers]:
+            bar = _bar(r.near_zero_fraction, peak, width=20)
+            tbl.add_row(
+                _truncate(r.name, 50),
+                "x".join(str(d) for d in r.shape),
+                f"{int(r.near_zero_fraction * r.numel):,} / {r.numel:,}",
+                f"{r.near_zero_fraction * 100:.2f}%",
+                bar,
+            )
+        console.print(tbl)
+
+    # Frozen layers
+    if report.frozen_layers:
+        console.print(
+            f"\n[bold yellow]WARNING:  {len(report.frozen_layers)} frozen layer pair(s) "
+            f"(nearly identical weights)[/bold yellow]"
+        )
+        for a, b in report.frozen_layers[:10]:
+            console.print(f"  [dim]≈[/dim]  [cyan]{a}[/cyan]  ≈  [cyan]{b}[/cyan]")
+
+    if report.is_healthy:
+        console.print(
+            "\n[bold green]OK:  No numerical issues detected. Model looks healthy.[/bold green]"
+        )

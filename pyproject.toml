@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "safediff"
-version = "0.1.0"
-description = "Diff PyTorch model weights like you diff code. Find exploding layers, dead neurons, and visualize change in your terminal."
+version = "0.2.0"
+description = "Checkpoint static audit and learning dynamics tracking for PyTorch models."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
